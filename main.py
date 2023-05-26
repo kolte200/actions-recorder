@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 from pynput import mouse, keyboard
 import json
 import time
@@ -13,6 +15,8 @@ mouseController = mouse.Controller()
 
 startHotKeyCode = "<ctrl>+<alt>+b"
 stopHotKeyCode  = "<ctrl>+<alt>+h"
+
+
 
 KEY_PRESS = 0
 KEY_RELEASE = 1
@@ -32,25 +36,25 @@ class Action:
         self.timestamp : float = timestamp
 
 
-def serializeKey(key : keyboard.Key | keyboard.KeyCode) -> str | int:
+def serialize_key(key : keyboard.Key | keyboard.KeyCode) -> str | int:
     if isinstance(key, keyboard.Key):
         return key.name
     else:
         return key.vk
 
-def deserializeKey(key : int | str) -> keyboard.Key | keyboard.KeyCode:
+def deserialize_key(key : int | str) -> keyboard.Key | keyboard.KeyCode:
     if isinstance(key, str):
         return keyboard.Key[key]
     else:
         return keyboard.KeyCode.from_vk(key)
 
-def serializeAction(action : Action, timestampOffset : float) -> str:
+def serialize_action(action : Action, timestampOffset : float) -> str:
     r = {
         'type': action.type,
         'ts': int((action.timestamp - timestampOffset) * 1_000_000)
     }
     if action.type in [KEY_PRESS, KEY_RELEASE]:
-        r['key'] = serializeKey(action.key)
+        r['key'] = serialize_key(action.key)
     elif action.type in [MOUSE_RELEASE, MOUSE_PRESS, MOUSE_MOVE, MOUSE_SCROLL]:
         r['x'] = action.x
         r['y'] = action.y
@@ -58,30 +62,37 @@ def serializeAction(action : Action, timestampOffset : float) -> str:
         r['btn'] = action.button.name
     return json.dumps(r)
 
-def deserializeAction(data : dict) -> Action:
+def deserialize_action(data : dict) -> Action:
     return Action(
         data['ts'] / 1_000_000.,
         data['type'],
-        deserializeKey(data['key']) if 'key' in data else None,
+        deserialize_key(data['key']) if 'key' in data else None,
         data['x'] if 'x' in data else 0,
         data['y'] if 'y' in data else 0,
         mouse.Button[data['btn']] if 'btn' in data else None)
 
-def serializeActions(actions : list[Action]):
+def serialize_actions(actions : list[Action]):
     timestampOffset = actions[0].timestamp
-    return '[' + ','.join([serializeAction(a, timestampOffset) for a in actions]) + ']'
+    return '[' + ','.join([serialize_action(a, timestampOffset) for a in actions]) + ']'
 
-def deserializeActions(s : str):
+def deserialize_actions(s : str):
     data = json.loads(s)
-    return [deserializeAction(a) for a in data]
+    return [deserialize_action(a) for a in data]
 
 
-# Recorded data
+MODE_UNKNOWN = 0
+MODE_RECORD = 1
+MODE_PLAY = 2
+
+
 actions : list[Action] = []
 recording : bool = False
-recorded : bool = False
 playing : bool = False
-finish : bool = False
+mode : int = MODE_UNKNOWN
+
+nextTimestamp = 0
+timeOffset = 0
+
 
 endSequence : list[Action] = [
     Action(0, KEY_RELEASE, keyboard.Key.alt),
@@ -92,7 +103,7 @@ endSequence : list[Action] = [
 
 
 def on_move(x : int, y : int):
-    global recording, recorded, playing, finish
+    global actions
     if recording:
         action = Action(time.time(), MOUSE_MOVE)
         action.x = x
@@ -100,7 +111,7 @@ def on_move(x : int, y : int):
         actions.append(action)
 
 def on_click(x : int, y : int, button : mouse.Button, pressed : bool):
-    global recording, recorded, playing, finish
+    global actions
     if recording:
         action = Action(time.time(), MOUSE_PRESS if pressed else MOUSE_RELEASE)
         action.x = x
@@ -109,7 +120,7 @@ def on_click(x : int, y : int, button : mouse.Button, pressed : bool):
         actions.append(action)
 
 def on_scroll(x : int, y : int, dx : int, dy : int):
-    global recording, recorded, playing, finish
+    global actions
     if recording:
         action = Action(time.time(), MOUSE_SCROLL)
         action.x = dx
@@ -117,7 +128,7 @@ def on_scroll(x : int, y : int, dx : int, dy : int):
         actions.append(action)
 
 def on_press(key : keyboard.Key | keyboard.KeyCode):
-    global recording, recorded, playing, finish
+    global actions
     startHotKey.press(keyboardListener.canonical(key))
     stopHotKey.press(keyboardListener.canonical(key))
     if recording:
@@ -126,7 +137,7 @@ def on_press(key : keyboard.Key | keyboard.KeyCode):
         actions.append(action)
 
 def on_release(key : keyboard.Key):
-    global recording, recorded, playing, finish
+    global actions
     startHotKey.release(keyboardListener.canonical(key))
     stopHotKey.release(keyboardListener.canonical(key))
     if recording:
@@ -134,45 +145,53 @@ def on_release(key : keyboard.Key):
         action.key = key
         actions.append(action)
 
+
+def input_bool(q):
+    return input(q).lower()[:1] not in ['n', '0', 'f']
+
+def input_int(q):
+    while True:
+        try:
+            return int(input(q))
+        except ValueError:
+            print("Invalid integer")
+
+
 def on_start():
-    global recording, recorded, playing, finish, actions
-    if not recorded:
-        if bool(input("Read from file?: ")):
-            with open('data.json', 'r') as f:
-                actions = deserializeActions(f.read())
-            recorded = True
-            print("File readed and actions loaded")
-        else:
-            recording = True
-            actions.clear()
-            print("Start recording")
+    global recording, playing, actions, nextTimestamp, timeOffset
+    if mode == MODE_RECORD:
+        print("Start recording")
+        recording = True
+        actions.clear()
     else:
-        playing = True
-        print("Start playing")
+        if actions is not None and len(actions) > 0:
+            print("Start playing")
+            nextTimestamp = time.time()
+            timeOffset = nextTimestamp - actions[0].timestamp
+            playing = True
+
+
 
 def on_stop():
-    global recording, recorded, playing, finish
-    if not recorded:
-        recording = False
-        recorded = True
-        actions.extend(endSequence)
+    global recording, playing, mode
+
+    if mode == MODE_RECORD:
         print("Stop recording")
-        if bool(input("Write to a file?: ")):
+        recording = False
+        actions.extend(endSequence)
+        if input_bool("Save this record?: "):
             with open('data.json', 'w') as f:
-                f.write(serializeActions(actions))
-        print("File writed and actions saved")
-    elif playing:
-        playing = False
+                f.write(serialize_actions(actions))
+            print("Record saved")
+
+    elif mode == MODE_PLAY:
         print("Stop playing")
-    else:
-        # Stop has been pressed two time so exit
-        print("Exit")
-        finish = True
-        mouseListener.stop()
-        keyboardListener.stop()
+        playing = False
+
+    mode = MODE_UNKNOWN
 
 
-def playUserAction(action : Action):
+def play_user_action(action : Action):
     if action.type == MOUSE_MOVE:
         mouseController.move(action.x - mouseController.position[0], action.y - mouseController.position[1])
     elif action.type == MOUSE_PRESS:
@@ -191,40 +210,84 @@ def playUserAction(action : Action):
         raise Exception("Unknow action type : " + action.type)
 
 
+def play_loop():
+    global mode, actions, nextTimestamp, timeOffset, playing
+    mode = MODE_PLAY
+
+    with open('data.json', 'r') as f:
+        actions = deserialize_actions(f.read())
+    if len(actions) == 0:
+        print("Can't load empty record")
+        return
+    print("Record loaded")
+
+    currentEventIndex = 0
+    playEndTime = time.time() + (60 * 60 * 7) # 7 hour max
+
+    while mode == MODE_PLAY and time.time() < playEndTime:
+        if playing:
+            currentTime = time.time()
+            while nextTimestamp < currentTime:
+                play_user_action(actions[currentEventIndex])
+                currentEventIndex += 1
+                if currentEventIndex >= len(actions):
+                    currentEventIndex = 0
+                    nextTimestamp = time.time() + 1
+                    timeOffset = nextTimestamp - actions[0].timestamp
+                    print("Restart playing")
+                    break
+                else:
+                    nextTimestamp = actions[currentEventIndex].timestamp + timeOffset
+                currentTime = time.time()
+            time.sleep(min(1 / 500, nextTimestamp - currentTime))
+        else:
+            time.sleep(1 / 500)
+
+    mode = MODE_UNKNOWN
+    playing = False
+
+
+def record_loop():
+    global mode, recording
+    mode = MODE_RECORD
+
+    while mode == MODE_RECORD:
+        time.sleep(1 / 500)
+
+    mode = MODE_UNKNOWN
+    recording = False
+
+
 startHotKey = keyboard.HotKey(keyboard.HotKey.parse(startHotKeyCode), on_start)
 stopHotKey  = keyboard.HotKey(keyboard.HotKey.parse(stopHotKeyCode),  on_stop)
 
 mouseListener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
 keyboardListener = keyboard.Listener(on_press=on_press, on_release=on_release)
 
-mouseListener.start()
-keyboardListener.start()
 
+if __name__ == "__main__":
+    mouseListener.start()
+    keyboardListener.start()
 
-lastPlaying = False
-timeOffset = 0
-nextTimestamp = 0
-currentEventIndex = 0
+    while True:
+        print()
+        print("What do you want to do ?")
+        print("  1 : Play a record")
+        print("  2 : Create a new record")
+        print("  3 : Quit")
+        r = int(input("> "))
 
-while not finish:
-    if not lastPlaying and playing:
-        # Start playing
-        lastPlaying = True
-        currentEventIndex = 0
-        nextTimestamp = 0
-        timeOffset = time.time() - actions[0].timestamp
-    
-    if playing:
-        currentTime = time.time()
-        if currentTime > nextTimestamp:
-            playUserAction(actions[currentEventIndex])
-            currentEventIndex += 1
-            if currentEventIndex >= len(actions):
-                currentEventIndex = 0
-                nextTimestamp = time.time() + 1
-                timeOffset = time.time() - actions[0].timestamp
-                print("Restart playing")
-            else:
-                nextTimestamp = actions[currentEventIndex].timestamp + timeOffset
+        if r == 2:
+            print("Press %s to start and %s to stop recoring" % (startHotKeyCode, stopHotKeyCode))
+            record_loop()
 
-    time.sleep(1. / 10_000)
+        elif r == 1:
+            print("Press %s to start and %s to stop playing" % (startHotKeyCode, stopHotKeyCode))
+            play_loop()
+
+        elif r == 3:
+            print("Good by!")
+            break
+
+        else:
+            print("Invalid response")
